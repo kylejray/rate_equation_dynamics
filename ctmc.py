@@ -9,20 +9,20 @@ def normal_generator(S=10, N=1, mu=0, sigma=1):
 def gamma_generator(S=10, N=1, mu=1, sigma=.1):
     return np.random.gamma(mu**2/sigma**2, sigma**2/mu, (N,S,S))
 
-def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None):
+def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, min_rate=6):
     # imposes a kind of 1-D ring connectivity
 
     # if max_jump is 1, then only nearest neighbor jumps are allowed (1->2, 2->3, 5->4 etc..)
     if max_jump is None or max_jump > S-1:
         max_jump = S-1
 
-    R = np.zeros((N,S,S))
+    R = np.ones((N,S,S)) * 10**(-min_rate)
     
     
     for i in range(1,max_jump+1):
         # sets forward rates to be decreasing in distance from initial state plus a random normal distribution, here N(mu,sigma).
         # for example, the jump rate from 2->3 in a 5 state system would be 4+N(mu, sigma) where 2->5 would be 1+N(mu,sigma)
-        new_vals_p = abs((S-i)+np.random.normal(mu, sigma, size=(N,S)))
+        new_vals_p = np.abs((S-i)+np.random.normal(mu, sigma, size=(N,S)))
         # in order to be less on average, and set a preferred direciton the reverse rates are set to be R_{3->2} = N(.6,.3)*R_{2->3}
         new_vals_m = np.abs(new_vals_p*np.random.normal(.6, .3, size=(N,S)))
 
