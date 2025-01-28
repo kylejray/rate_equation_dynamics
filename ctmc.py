@@ -38,10 +38,44 @@ def detailed_balance_generator(S=5, N=1, energy = None, energy_gen = np.random.u
     assert energy.shape == (N,S)    
     return np.exp(beta*(energy[:,:,None]-energy[:,None,:]))
 
+def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.random.uniform, beta=1, gen_args=[.1,1], n_pumps=0, pump_strength=-10):
+    n_pairs = int((S**2-S)/2)
+
+    if energy is None:
+        energy = energy_gen(*gen_args, size=(N,S))
+    assert energy.shape == (N,S)
+        
+    if barrier is None:
+        barrier = energy_gen(*gen_args, size=(N,n_pairs)) 
+    assert barrier.shape == (N, n_pairs)
+
+    barrier = np.abs(barrier)
+
+    delta_E = energy[:,:,None] - energy[:,None,:]
+
+    idx = np.argwhere(delta_E > 0).reshape(N, -1, 3)
+
+
+    delta_E[idx[...,0],idx[...,1],idx[...,2]] = -barrier
+    delta_E[idx[...,0],idx[...,2],idx[...,1]] += -barrier
+    if n_pumps > 0:
+        pump_offsets = energy_gen(*gen_args, size=(N,n_pumps)) * pump_strength
+        pump_idx = np.zeros( shape=(N, n_pumps, 3), dtype='int')
+        pump_idx[...,1:] =  np.random.randint(0,S, size = (N, n_pumps, 2))
+        pump_idx[...,0] = np.floor(np.arange(0,N*n_pumps)/(n_pumps)).reshape(N,-1)
+
+        delta_E[tuple(pump_idx.T)]+= pump_offsets.T
+
+
+    return np.exp(delta_E)
+
+
+
 
 class ContinuousTimeMarkovChain():
     def __init__(self, R=None, generator=uniform_generator, **gen_kwargs):
         self.scale = 1
+        self.timescale = 1
         self.batch = False
         self.time_even_states = True
         self.analytic_threshhold = 65
@@ -77,7 +111,7 @@ class ContinuousTimeMarkovChain():
         S, shape, size = self.__R_info(R)
         
         assert len(shape) == 2 and size == S**2, 'each R must be a 2D square matrix'
-        assert ( np.sign(R-R*np.identity(S)) == np.ones(shape)-np.identity(S)).all(), 'R_ij must be + for i!=j'
+        assert ( np.sign(R-R*np.identity(S)) == np.ones(shape)-np.identity(S)).all(), 'R_ij must be >0 for i!=j'
 
         self.S = S
 
@@ -86,18 +120,21 @@ class ContinuousTimeMarkovChain():
 
         return R
     
-    def __normalize_R(self, R, max_val):
+    def normalize_R(self, R):
         if self.batch:
             R_max = np.abs(R).max(axis=-1).max(axis=-1)
         else:
             R_max = np.abs(R).max()
 
-        self.scale = R_max/ (np.minimum(R_max,max_val))
+        self.scale = R_max / self.timescale
+
+        #this is if we want to allowe slower scale processes, only cutting the fast ones down
+        #scale = R_max/ (np.minimum(R_max,self.timescale))
 
         if self.batch:
             R = (R.T / self.scale).T
         else:
-            R = R/self.scale
+            R = R / self.scale
 
         return R
     
@@ -122,7 +159,7 @@ class ContinuousTimeMarkovChain():
         R = self.verify_rate_matrix(R)
 
         if self.scale is not None:
-            R = self.__normalize_R(R, max_rate)
+            R = self.normalize_R(R)
 
         self.R = R
         if self.time_even_states is True:
