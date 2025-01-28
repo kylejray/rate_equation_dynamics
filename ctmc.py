@@ -38,7 +38,7 @@ def detailed_balance_generator(S=5, N=1, energy = None, energy_gen = np.random.u
     assert energy.shape == (N,S)    
     return np.exp(beta*(energy[:,:,None]-energy[:,None,:]))
 
-def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.random.uniform, beta=1, gen_args=[.1,1], n_pumps=0, pump_strength=-10):
+def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.random.uniform, beta=1, gen_args=[.1,1], n_pumps=0, pump_strength=10):
     n_pairs = int((S**2-S)/2)
 
     if energy is None:
@@ -50,24 +50,26 @@ def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.
     assert barrier.shape == (N, n_pairs)
 
     barrier = np.abs(barrier)
+    delta_E = -energy[:,:,None] + energy[:,None,:]
 
-    delta_E = energy[:,:,None] - energy[:,None,:]
+    # find transitions where delta_E is negative
+    idx = np.argwhere(delta_E < 0).reshape(N, -1, 3)
 
-    idx = np.argwhere(delta_E > 0).reshape(N, -1, 3)
+    # transitions from high energy to low energy just need to overcome the barrier
+    delta_E[idx[...,0],idx[...,1],idx[...,2]] = barrier
+    # low to high energy transitions must overcome the energy difference and the barrier as well
+    delta_E[idx[...,0],idx[...,2],idx[...,1]] += barrier
 
-
-    delta_E[idx[...,0],idx[...,1],idx[...,2]] = -barrier
-    delta_E[idx[...,0],idx[...,2],idx[...,1]] += -barrier
+    # adds catalytic pumps to some one way transitions
     if n_pumps > 0:
         pump_offsets = energy_gen(*gen_args, size=(N,n_pumps)) * pump_strength
         pump_idx = np.zeros( shape=(N, n_pumps, 3), dtype='int')
         pump_idx[...,1:] =  np.random.randint(0,S, size = (N, n_pumps, 2))
         pump_idx[...,0] = np.floor(np.arange(0,N*n_pumps)/(n_pumps)).reshape(N,-1)
 
-        delta_E[tuple(pump_idx.T)]+= pump_offsets.T
+        delta_E[tuple(pump_idx.T)] += pump_offsets.T
 
-
-    return np.exp(delta_E)
+    return np.exp(-delta_E)
 
 
 
