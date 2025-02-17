@@ -38,38 +38,45 @@ def detailed_balance_generator(S=5, N=1, energy = None, energy_gen = np.random.u
     assert energy.shape == (N,S)    
     return np.exp(beta*(energy[:,:,None]-energy[:,None,:]))
 
+from sys import getsizeof
+from time import sleep
 def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.random.uniform, beta=1, gen_args=[.1,1], n_pumps=0, pump_strength=10):
     n_pairs = int((S**2-S)/2)
 
     if energy is None:
         energy = energy_gen(*gen_args, size=(N,S))
     assert energy.shape == (N,S)
-        
+    
     if barrier is None:
         barrier = energy_gen(*gen_args, size=(N,n_pairs)) 
     assert barrier.shape == (N, n_pairs)
-
     barrier = np.abs(barrier)
     delta_E = -energy[:,:,None] + energy[:,None,:]
-
     # find transitions where delta_E is negative
     idx = np.argwhere(delta_E < 0).reshape(N, -1, 3)
 
+    #delta_E = np.where(delta_E>0, barrier+delta_E[delta_E>0], delta_E)
     # transitions from high energy to low energy just need to overcome the barrier
     delta_E[idx[...,0],idx[...,1],idx[...,2]] = barrier
+    sleep(10)
     # low to high energy transitions must overcome the energy difference and the barrier as well
     delta_E[idx[...,0],idx[...,2],idx[...,1]] += barrier
 
+    barrier = None
+    idx = None
+
+
     # adds catalytic pumps to some one way transitions
     if n_pumps > 0:
+        idx = np.zeros( shape=(N, n_pumps, 3), dtype='int')
         pump_offsets = energy_gen(*gen_args, size=(N,n_pumps)) * pump_strength
-        pump_idx = np.zeros( shape=(N, n_pumps, 3), dtype='int')
-        pump_idx[...,1:] =  np.random.randint(0,S, size = (N, n_pumps, 2))
-        pump_idx[...,0] = np.floor(np.arange(0,N*n_pumps)/(n_pumps)).reshape(N,-1)
+        idx[...,1:] =  np.random.randint(0,S, size = (N, n_pumps, 2))
+        idx[...,0] = np.floor(np.arange(0,N*n_pumps)/(n_pumps)).reshape(N,-1)
+        delta_E[tuple(idx.T)] += pump_offsets.T
+    #print([getsizeof(item)/2**30 for item in [energy, barrier, delta_E, idx, pump_offsets]])
+    delta_E = np.exp(-delta_E)
 
-        delta_E[tuple(pump_idx.T)] += pump_offsets.T
-
-    return np.exp(-delta_E)
+    return delta_E
 
 
 
@@ -261,7 +268,7 @@ class ContinuousTimeMarkovChain():
         state = state / np.sum(state, axis=-1)[:,None]
         return state
 
-    def get_meps(self, dt0=.5 , state=None, max_iter=500, dt_iter=5, diagnostic=False):
+    def get_meps(self, dt0=.5 , state=None, max_iter=1000, dt_iter=5, diagnostic=False):
         if state is None:
             try:
                 state = self.ness
@@ -331,10 +338,12 @@ class ContinuousTimeMarkovChain():
             try:
                 ness = self.__ness_estimate()
             except:
-                print('defaulting to numeric solution')
+                if self.verbose:
+                    print('defaulting to numeric solution')
                 ness = self.get_uniform()
         else:
-            print('defaulting to numeric solution')
+            if self.verbose:
+                print('defaulting to numeric solution')
             ness = self.get_uniform()
 
         i=0
