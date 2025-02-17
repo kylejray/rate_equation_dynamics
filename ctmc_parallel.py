@@ -19,18 +19,18 @@ sys.path.append(os.path.expanduser('~/source/'))
 import kyle_tools as kt
 
 base_dir = ''
-strength = 15
+strength = 8
 
 if rank == 0:
     base_dir = kt.generate_save_dir()+f'strength{strength:02}/'
 
 base_dir = comm.bcast(base_dir, root=0)
-rank_dir = base_dir + f'ratio{rank+1}/'
+rank_dir = base_dir + f'ratio{rank+1:02}/'
 os.makedirs(rank_dir, exist_ok=True)
 
 
-s_vals = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_000]
-s_machines = [1000,500,300,300,100,100,50,40,30]
+s_vals = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000]
+s_machines = [1000,500,300,300,100,100,50,40,30, 10, 2]
 
 ratio = 1/(rank+1)
 
@@ -55,4 +55,4 @@ for i,[s,n] in enumerate(zip(s_vals,s_machines)):
 
 save_dict = {f"{s:05}":d for s,d in zip(s_vals,output)}
 
-np.savez(base_dir+'{summary_data}.npz', s_values = s_vals, s_trials=s_machines, **save_dict)
+np.savez(base_dir+f'str_{strength:02}_ratio_{rank+1:02}.npz', s_values = s_vals, s_trials=s_machines, **save_dict)

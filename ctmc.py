@@ -268,7 +268,7 @@ class ContinuousTimeMarkovChain():
         state = state / np.sum(state, axis=-1)[:,None]
         return state
 
-    def get_meps(self, dt0=.5 , state=None, max_iter=1000, dt_iter=5, diagnostic=False):
+    def get_meps(self, dt0=.5 , state=None, max_iter=700, dt_iter=10, diagnostic=False):
         if state is None:
             try:
                 state = self.ness
