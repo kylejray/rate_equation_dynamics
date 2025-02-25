@@ -88,6 +88,7 @@ class ContinuousTimeMarkovChain():
         self.batch = False
         self.time_even_states = True
         self.analytic_threshhold = 65
+        self.min_rate = 1E-10
         if R is not None:
             self.set_rate_matrix(R)
         else:
@@ -123,7 +124,8 @@ class ContinuousTimeMarkovChain():
         assert ( np.sign(R-R*np.identity(S)) == np.ones(shape)-np.identity(S)).all(), 'R_ij must be >0 for i!=j'
 
         self.S = S
-
+        R[np.abs(R) <= self.min_rate] = self.min_rate
+        
         if not (R.sum(axis=-1) == np.zeros(self.S)).all():
             R = self.__set_diags(R)
 
@@ -268,49 +270,75 @@ class ContinuousTimeMarkovChain():
         state = state / np.sum(state, axis=-1)[:,None]
         return state
 
-    def get_meps(self, dt0=.5 , state=None, max_iter=700, dt_iter=10, diagnostic=False):
+    def get_meps(self, dt0=.5, dtmin=.01 , state=None, max_iter=500, dt_iter=20, diagnostic=False):
         if state is None:
             try:
                 state = self.ness
             except:
                 state = self.get_uniform()
 
-        eprs = []
+        eprs = [self.get_epr(state)]
         states = [state]
         doneBool = np.array(False)
+        doneEprBool = np.array(False)
         negativeBool = False
+        nanStateBool = False
         i=0
-        j=-1
-        while (not np.all(doneBool) or np.any(negativeBool)) and i < max_iter:
+        if self.batch:
+            j = -1*np.ones(self.R.shape[0])
+        else:
+            j = np.array(-1)
+        dt = dt0 * (2/(2+j))
+        while (not np.all(doneBool) or np.any(negativeBool) or np.any(nanStateBool)) and i < max_iter:
             if i % dt_iter == 0:
                 j += 1 
             dt = dt0 * (2/(2+j))
-            epr = self.get_epr(state)
-            eprs.append(epr)
+
             if self.batch:
-                new_state = (state + dt*(self.get_time_deriv(state) + state*(epr-self.get_statewise_epr(state).T).T))
+                new_state = (state + dt[:,None]*(self.get_time_deriv(state) + state*(eprs[-1]-self.get_statewise_epr(state).T).T))
                 new_state[doneBool] = state[doneBool]  
             else:
-                new_state = state + dt * (self.get_time_deriv(state) + state*(epr - self.get_statewise_epr(state)))
+                new_state = state + dt * (self.get_time_deriv(state) + state*(eprs[-1] - self.get_statewise_epr(state)))
             
             negativeBool = np.any(new_state < 0, axis=-1)
+            nanStateBool = np.any(np.isnan(new_state), axis=-1)
+
             if np.any(negativeBool):
-                new_state[negativeBool] = state[negativeBool]
-                j += 1
+                num_neg = sum(negativeBool)
                 if diagnostic:
-                    print(f'dt changed at iteration{i}')
+                    print(f'rewinding {num_neg} states to avoid negative states at iteration {i}')
+                new_state[negativeBool] = state[negativeBool]
+                j[negativeBool] += 1
+                #if diagnostic:
+                #    print(f'dt changed at iteration{i}')
+            if np.any(nanStateBool):
+                num_nan = sum(nanStateBool)
+                if diagnostic:
+                    print(f'rewinding {num_nan} states to avoid nan at iteration {i}')
+                new_state[nanStateBool] = state[nanStateBool]
+                j[nanStateBool] += 1
             
+            new_state = (new_state.T / new_state.sum(axis=-1)).T
+
+            epr = self.get_epr(state)
+            eprs.append(epr)
+
             states.append(new_state)
             state = new_state
-            doneBool = np.all(np.isclose(states[-2],states[-1], atol=1E-6), axis=-1)
+
+            if i >= dt_iter:
+                doneBool = np.all(np.isclose(states[-2],states[-1], rtol=1E-5), axis=-1)
+                doneEprBool = np.isclose(eprs[-2],eprs[-1], rtol=1E-5)
+
             i += 1
         if i == max_iter:
-            print(f'meps didnt converge after {i} iterations in {np.sum(~doneBool)} machines')    
+            print(f'meps didnt converge after {i} iterations in {np.sum(~doneBool)} machines')
+            print(f'mepr didnt converge after {i} iterations in {np.sum(~doneEprBool)} machines')     
         self.meps = states[-1]
         if diagnostic is False:
             return self.meps
         else:
-            return np.array(eprs), np.array(states), doneBool
+            return np.array(eprs), np.array(states), doneBool, doneEprBool
     
     def __ness_estimate(self):
         if self.batch:
