@@ -88,13 +88,25 @@ class ContinuousTimeMarkovChain():
         self.batch = False
         self.time_even_states = True
         self.analytic_threshhold = 65
-        self.min_rate = 1E-10
+        self.min_rate = 1E-16
+        self.verbose = False
         if R is not None:
             self.set_rate_matrix(R)
         else:
             self.generator = generator
             self.gen_kwargs = gen_kwargs
             self.set_rate_matrix(self.generator(**self.gen_kwargs))     
+    
+    def set_rate_matrix(self, R, max_rate=1):
+        R = self.verify_rate_matrix(R)
+        R = self.normalize_R(R)
+        self.R = R
+        if self.time_even_states is True:
+            self.rev_R = self.R
+        if self.time_even_states is False:
+            self.rev_R = self.get_reversal_matrix() @ self.R @ self.get_reversal_matrix().T
+        self.__set_statewise_Q()
+        return 
     
     def __R_info(self, R):
         if self.batch:
@@ -118,12 +130,15 @@ class ContinuousTimeMarkovChain():
         if len(R.shape) == 3:
             self.batch = True
         
+        R = self.normalize_R(R)
+
         S, shape, size = self.__R_info(R)
         
         assert len(shape) == 2 and size == S**2, 'each R must be a 2D square matrix'
         assert ( np.sign(R-R*np.identity(S)) == np.ones(shape)-np.identity(S)).all(), 'R_ij must be >0 for i!=j'
 
         self.S = S
+
         R[np.abs(R) <= self.min_rate] = self.min_rate
         
         if not (R.sum(axis=-1) == np.zeros(self.S)).all():
@@ -139,7 +154,7 @@ class ContinuousTimeMarkovChain():
 
         self.scale = R_max / self.timescale
 
-        #this is if we want to allowe slower scale processes, only cutting the fast ones down
+        #this is if we want to allow slower scale processes, only cutting the fast ones down
         #scale = R_max/ (np.minimum(R_max,self.timescale))
 
         if self.batch:
@@ -160,27 +175,15 @@ class ContinuousTimeMarkovChain():
         
         R_diags, rev_R_diags = [ R*np.identity(self.S) for R in [self.R, self.rev_R]]
 
-
         self.statewise_Q = ((self.R * np.log(self.R/rev_R_T) )+ R_diags - rev_R_diags).sum(axis=-1)
+
+        if np.any(np.isnan(self.statewise_Q)):
+            print('statewise heat contained NANs, re-veryfying matrix')
+            self.set_rate_matrix(self.R)
 
         return
 
 
-    def set_rate_matrix(self, R, max_rate=1):
-        R = self.verify_rate_matrix(R)
-
-        if self.scale is not None:
-            R = self.normalize_R(R)
-
-        self.R = R
-        if self.time_even_states is True:
-            self.rev_R = self.R
-        if self.time_even_states is False:
-            self.rev_R = self.get_reversal_matrix() @ self.R @ self.get_reversal_matrix().T
-
-        self.__set_statewise_Q()
-
-        return 
 
     def get_reversal_matrix(self):
         try: involution = self.involution_indices
@@ -270,7 +273,7 @@ class ContinuousTimeMarkovChain():
         state = state / np.sum(state, axis=-1)[:,None]
         return state
 
-    def get_meps(self, dt0=.5, dtmin=.01 , state=None, max_iter=500, dt_iter=20, diagnostic=False):
+    def get_meps(self, dt0=.5, dtmin=.001 , state=None, max_iter=50_000, dt_iter=100, diagnostic=False):
         if state is None:
             try:
                 state = self.ness
@@ -326,9 +329,12 @@ class ContinuousTimeMarkovChain():
             states.append(new_state)
             state = new_state
 
+            if not diagnostic:
+                eprs = eprs[-3:]
+                states = states[-3:]
             if i >= dt_iter:
-                doneBool = np.all(np.isclose(states[-2],states[-1], rtol=1E-5), axis=-1)
-                doneEprBool = np.isclose(eprs[-2],eprs[-1], rtol=1E-5)
+                doneBool = np.all(np.isclose(states[-1],states[-2], rtol=1E-4, atol=1E-16), axis=-1)
+                doneEprBool = np.isclose(eprs[-1],eprs[-2], rtol=1E-4, atol=1E-16)
 
             i += 1
         if i == max_iter:
@@ -345,18 +351,46 @@ class ContinuousTimeMarkovChain():
             vals, vects = np.linalg.eig(self.R.transpose(0,2,1))
         else:
             vals, vects = np.linalg.eig(self.R.T)
-        zero_vals = np.isclose(vals, 0)
 
-        assert np.all(np.sum(zero_vals, axis=-1)) == 1, 'found none or more than one zero eigenval when finding the NESS'
+        vects = np.abs(vects)
+        vals = np.abs(vals)
+        # finds the positive eigenvector with the minimum time derivative
+        #min_idx = np.abs(np.array([ self.get_time_deriv(vects[:,i,:]) for i in range(self.S) ])).sum(axis=-1).argmin(axis=0)
+        # finds the eigenvector with the minimum magnitude eigenvalue
+        min_ix = np.argmin(vals, axis=-1)
 
         if self.batch:
-            ness = np.abs(vects[np.where(zero_vals)[0],:,np.where(zero_vals)[-1]])
-            return (ness.T/np.sum(ness,axis=-1)).T
+            ness = vects[range(len(vects)),:, min_idx]
         else:
-            ness = np.abs( vects[:,np.where(zero_vals)] ).ravel()
-            return ness/ness.sum()
+            ness = vects[:,min_idx].ravel()
+        
+        return self.normalize_state(ness)
+    
 
-    def get_ness(self, dt=.1, max_iter=500, force_analytic=False):
+    def validate_state(self, state):
+        shape = state.shape
+        assert shape[-1] == self.S, f'state shape expected to be {self.S}, not {shape[-1]}'
+
+        if self.batch:
+            assert len(shape) == 2, f'expected 2D shape, but state is shape {shape}'
+            assert shape[0] == self.R.shape[0], 'got {shape[0]} state vectors for {self.R.shape[0]} machines'
+
+        return True
+
+    def normalize_state(self, state):
+        assert validate_state, 'found invalid state shape'
+
+        if np.all(state.sum(axis=-1)==1):
+            return state
+        else:
+            if self.batch:
+                return (state.T/np.sum(state,axis=-1)).T
+            else:
+                return state/state.sum()
+
+
+
+    def get_ness(self, dt0=10, dt_iter=100, dtmin=.001, max_iter=50_000, force_analytic=False, diagnostic=False):
         try:
             return self.ness
         except:
@@ -374,15 +408,52 @@ class ContinuousTimeMarkovChain():
                 print('defaulting to numeric solution')
             ness = self.get_uniform()
 
-        i=0
-        while not np.all(np.isclose(self.get_time_deriv(ness),0, rtol=1E-5)) and i < max_iter:
+        dt = dt0
+        i = 0
+        negativeBool = False
+        doneBool = False
+
+        if self.batch:
+            j = -1*np.ones(self.R.shape[0])
+        else:
+            j = np.array(-1)
+
+        while ( (not np.all(doneBool)) or np.any(negativeBool) )  and i < max_iter:
+            if i % dt_iter == 0:
+                j += 1 
+            dt = dt0 * (2/(2+j))
+
             ness_list.append(ness)
-            ness = self.evolve_state(ness,dt)
+            if self.batch:
+                ness = self.evolve_state(ness,dt[:,None])
+            else:
+                ness = self.evolve_state(ness,dt)
+
+            negativeBool = np.any(ness < 0, axis=-1)
+            if np.any(negativeBool):
+                if diagnostic:
+                    num_neg = sum(negativeBool)
+                    print(f'rewinding {num_neg} states to avoid negative states at iteration {i}')
+                ness[negativeBool] = ness_list[-1][negativeBool]
+                j[negativeBool] += 1
+            
+            #doneBool = np.all(np.isclose(0, self.get_time_deriv(ness)))
+            doneBool = np.all(np.isclose(ness,ness_list[-1], rtol=1E-4, atol=1E-16), axis=-1)
+            
             i += 1
+
+            if not diagnostic:
+                ness_list = ness_list[-1:]
+        
         if i == max_iter:
-            print(f'ness didnt converge after {i} iterations')    
+            print(f'ness didnt converge after {i} iterations in {np.sum(~doneBool)} machines')
+
         self.ness = ness
-        return self.ness
+
+        if diagnostic:
+            return ness, ness_list
+        else:
+            return self.ness
         
     def dkl(self, p, q):
         assert (np.array([p,q])>=0).all, 'all probs must be non-negative'
