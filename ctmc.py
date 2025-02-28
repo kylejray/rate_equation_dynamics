@@ -228,7 +228,7 @@ class ContinuousTimeMarkovChain():
         return self.get_statewise_prob_current(state).sum(axis=-1)
 
     def evolve_state(self, state, dt):
-        return state + dt*self.get_time_deriv(state)
+        return self.normalize_state(state + dt*self.get_time_deriv(state))
     
     def get_statewise_epr(self, state):
         if self.batch:
@@ -378,7 +378,7 @@ class ContinuousTimeMarkovChain():
         return True
 
     def normalize_state(self, state):
-        assert validate_state, 'found invalid state shape'
+        assert self.validate_state, 'found invalid state shape'
 
         if np.all(state.sum(axis=-1)==1):
             return state
