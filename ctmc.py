@@ -88,7 +88,7 @@ class ContinuousTimeMarkovChain():
         self.batch = False
         self.time_even_states = True
         self.analytic_threshhold = 65
-        self.min_rate = 1E-16
+        self.min_rate = 1E-32
         self.verbose = False
         if R is not None:
             self.set_rate_matrix(R)
@@ -203,6 +203,15 @@ class ContinuousTimeMarkovChain():
         else:
             return np.matmul(state, R)
     
+    def get_meps_deriv(self, state, R = None):
+        if R is None:
+            R = self.R
+
+        if self.batch:
+            return self.get_time_deriv(state) + state * ( self.get_epr(state) - self.get_statewise_epr(state).T ).T
+        else:
+            return self.get_time_deriv(state) + state * ( self.get_epr(state) - self.get_statewise_epr(state) )
+    
 
     def get_statewise_activity_in(self, state):
         return self.get_time_deriv(state, R=self.R*(1-np.identity(self.S)))
@@ -272,13 +281,17 @@ class ContinuousTimeMarkovChain():
         state = np.exp(-cyclic_distance(state, mu)**2/(2*sigma[:,None]**2))
         state = state / np.sum(state, axis=-1)[:,None]
         return state
+    
 
-    def get_meps(self, dt0=.5, dtmin=.001 , state=None, max_iter=50_000, dt_iter=100, diagnostic=False):
+    def get_meps(self, dt0=1, dtmin=.001 , state=None, max_iter=50_000, dt_iter=150, diagnostic=False):
         if state is None:
             try:
-                state = self.ness
+                state = self.meps
             except:
-                state = self.get_uniform()
+                try:
+                    state = self.ness
+                except:
+                    state = self.get_uniform()
 
         eprs = [self.get_epr(state)]
         states = [state]
@@ -291,23 +304,24 @@ class ContinuousTimeMarkovChain():
             j = -1*np.ones(self.R.shape[0])
         else:
             j = np.array(-1)
-        dt = dt0 * (2/(2+j))
+        #dt = dt0 * (2/(2+j))
+    
         while (not np.all(doneBool) or np.any(negativeBool) or np.any(nanStateBool)) and i < max_iter:
             if i % dt_iter == 0:
-                j += 1 
+                j += 0 
             dt = dt0 * (2/(2+j))
 
             if self.batch:
-                new_state = (state + dt[:,None]*(self.get_time_deriv(state) + state*(eprs[-1]-self.get_statewise_epr(state).T).T))
-                new_state[doneBool] = state[doneBool]  
+                new_state = state + dt[:,None]*self.get_meps_deriv(state)
+                #new_state[doneBool] = state[doneBool]  
             else:
-                new_state = state + dt * (self.get_time_deriv(state) + state*(eprs[-1] - self.get_statewise_epr(state)))
+                new_state = state + dt * self.get_meps_deriv(state)
             
             negativeBool = np.any(new_state < 0, axis=-1)
             nanStateBool = np.any(np.isnan(new_state), axis=-1)
 
             if np.any(negativeBool):
-                num_neg = sum(negativeBool)
+                num_neg = np.sum(negativeBool)
                 if diagnostic:
                     print(f'rewinding {num_neg} states to avoid negative states at iteration {i}')
                 new_state[negativeBool] = state[negativeBool]
@@ -333,8 +347,9 @@ class ContinuousTimeMarkovChain():
                 eprs = eprs[-3:]
                 states = states[-3:]
             if i >= dt_iter:
-                doneBool = np.all(np.isclose(states[-1],states[-2], rtol=1E-4, atol=1E-16), axis=-1)
-                doneEprBool = np.isclose(eprs[-1],eprs[-2], rtol=1E-4, atol=1E-16)
+                doneBool = np.all(np.isclose(0, np.abs(self.get_meps_deriv(state))/np.maximum(1E-12,state), atol=1E-4), axis=-1)
+                #doneBool = np.all(np.isclose(states[-1],states[-2], rtol=1E-4, atol=1E-14), axis=-1)
+                doneEprBool = np.isclose(eprs[-1],eprs[-2], rtol=1E-3*dt, atol=1E-14)
 
             i += 1
         if i == max_iter:
@@ -390,23 +405,28 @@ class ContinuousTimeMarkovChain():
 
 
 
-    def get_ness(self, dt0=10, dt_iter=100, dtmin=.001, max_iter=50_000, force_analytic=False, diagnostic=False):
+    def get_ness(self, dt0=1, dt_iter=150, dtmin=.001, max_iter=50_000, force_analytic=False, diagnostic=False):
+        ness_list=[]
         try:
-            return self.ness
+            ness = self.ness
         except:
-            ness_list=[]
-
-        if np.log(self.R.shape[0])*np.sqrt(self.S) < self.analytic_threshhold or force_analytic: 
-            try:
-                ness = self.__ness_estimate()
-            except:
+            if np.log(self.R.shape[0])*np.sqrt(self.S) < self.analytic_threshhold or force_analytic: 
+                try:
+                    ness = self.__ness_estimate()
+                except:
+                    if self.verbose:
+                        print('defaulting to numeric solution')
+                    try:
+                        ness = self.meps
+                    except:
+                        ness = self.get_uniform()
+            else:
                 if self.verbose:
                     print('defaulting to numeric solution')
-                ness = self.get_uniform()
-        else:
-            if self.verbose:
-                print('defaulting to numeric solution')
-            ness = self.get_uniform()
+                try:
+                    ness = self.meps
+                except:
+                    ness = self.get_uniform()
 
         dt = dt0
         i = 0
@@ -438,7 +458,8 @@ class ContinuousTimeMarkovChain():
                 j[negativeBool] += 1
             
             #doneBool = np.all(np.isclose(0, self.get_time_deriv(ness)))
-            doneBool = np.all(np.isclose(ness,ness_list[-1], rtol=1E-4, atol=1E-16), axis=-1)
+            doneBool = np.all(np.isclose(0, np.abs(self.get_time_deriv(ness))/np.maximum(1E-12,ness), atol=1E-4), axis=-1)
+            #doneBool = np.all(np.isclose(ness,ness_list[-1], rtol=1E-4, atol=1E-16), axis=-1)
             
             i += 1
 
@@ -451,7 +472,7 @@ class ContinuousTimeMarkovChain():
         self.ness = ness
 
         if diagnostic:
-            return ness, ness_list
+            return ness, ness_list, doneBool
         else:
             return self.ness
         
