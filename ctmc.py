@@ -89,6 +89,7 @@ class ContinuousTimeMarkovChain():
         self.time_even_states = True
         self.analytic_threshhold = 65
         self.min_rate = 1E-32
+        self.min_state = 1E-16
         self.verbose = False
         if R is not None:
             self.set_rate_matrix(R)
@@ -183,8 +184,6 @@ class ContinuousTimeMarkovChain():
 
         return
 
-
-
     def get_reversal_matrix(self):
         try: involution = self.involution_indices
         except:
@@ -208,12 +207,14 @@ class ContinuousTimeMarkovChain():
             R = self.R
 
         if self.batch:
-            return self.get_time_deriv(state) + state * ( self.get_epr(state) - self.get_statewise_epr(state).T ).T
+            return self.get_time_deriv(state, R) + state * ( self.get_epr(state, R) - self.get_statewise_epr(state, R).T ).T
         else:
-            return self.get_time_deriv(state) + state * ( self.get_epr(state) - self.get_statewise_epr(state) )
+            return self.get_time_deriv(state, R) + state * ( self.get_epr(state, R) - self.get_statewise_epr(state, R) )
     
 
-    def get_statewise_activity_in(self, state):
+    def get_statewise_activity_in(self, state, R = None):
+        if R is None:
+            R = self.R
         return self.get_time_deriv(state, R=self.R*(1-np.identity(self.S)))
         #return self.get_time_deriv(state) - state *((self.R*np.identity(self.S)).sum(axis=-1))
 
@@ -237,21 +238,29 @@ class ContinuousTimeMarkovChain():
         return self.get_statewise_prob_current(state).sum(axis=-1)
 
     def evolve_state(self, state, dt):
-        return self.normalize_state(state + dt*self.get_time_deriv(state))
+        next_state = state + dt*self.get_time_deriv(state)
+        if np.any( next_state < 0 ):
+            next_state[ next_state < 0] = state[next_state < 0] / 10
+        return self.normalize_state(next_state)
     
-    def get_statewise_epr(self, state):
+    def get_statewise_epr(self, state, R=None):
+        if R is None:
+            self.R = R
+
         if self.batch:
-            surprisal_rate = -np.einsum('nik,nk->ni', self.R , np.log(state) )
+            surprisal_rate = -np.einsum('nik,nk->ni', R , np.log(state) )
         else:
-            surprisal_rate = -np.matmul(self.R, np.log(state))
+            surprisal_rate = -np.matmul(R, np.log(state))
 
         return surprisal_rate + self.statewise_Q
     
-    def get_epr(self,state):
+    def get_epr(self,state, R=None):
+        if R is None:
+            R = self.R
         if self.batch:
-            return np.einsum('nk,nk->n', state, self.get_statewise_epr(state))
+            return np.einsum('nk,nk->n', state, self.get_statewise_epr(state, R))
         else:
-            return np.matmul(state, self.get_statewise_epr(state))
+            return np.matmul(state, self.get_statewise_epr(state, R))
     
     def get_uniform(self):
         if self.batch:
@@ -261,10 +270,11 @@ class ContinuousTimeMarkovChain():
     
     def get_random_state(self):
         if self.batch:
-            state = np.random.uniform(1E-16, 1, (self.R.shape[0],self.S))
+            state = np.random.dirichlet(np.ones(self.S), self.R.shape[0])
         else:
-            state = np.random.uniform(1E-16, 1, self.S)
-        return (state.T/ state.sum(axis=-1)).T
+            state = np.random.dirichlet(np.ones(self.S))
+
+        return self.normalize_state(state)
     
     def get_local_state(self, mu=None, sigma=None):
         if self.batch:
@@ -283,7 +293,7 @@ class ContinuousTimeMarkovChain():
         return state
     
 
-    def get_meps(self, dt0=1, dtmin=.001 , state=None, max_iter=50_000, dt_iter=150, diagnostic=False):
+    def get_meps(self, dt0=1, dt_min=1E-8 , state=None, max_iter=50_000, dt_iter=50, diagnostic=False):
         if state is None:
             try:
                 state = self.meps
@@ -301,22 +311,27 @@ class ContinuousTimeMarkovChain():
         nanStateBool = False
         i=0
         if self.batch:
-            j = -1*np.ones(self.R.shape[0])
+            j = -1.*np.ones(self.R.shape[0])
         else:
-            j = np.array(-1)
+            j = np.array(-1.)
         #dt = dt0 * (2/(2+j))
     
         while (not np.all(doneBool) or np.any(negativeBool) or np.any(nanStateBool)) and i < max_iter:
             if i % dt_iter == 0:
-                j += 0 
-            dt = dt0 * (2/(2+j))
+                j += 1
+            dt = np.maximum(dt0*.95**j, dt_min)
 
             if self.batch:
+
+                state / self.get_meps_deriv(state)
+
                 new_state = state + dt[:,None]*self.get_meps_deriv(state)
                 #new_state[doneBool] = state[doneBool]  
             else:
                 new_state = state + dt * self.get_meps_deriv(state)
             
+            
+
             negativeBool = np.any(new_state < 0, axis=-1)
             nanStateBool = np.any(np.isnan(new_state), axis=-1)
 
@@ -325,29 +340,41 @@ class ContinuousTimeMarkovChain():
                 if diagnostic:
                     print(f'rewinding {num_neg} states to avoid negative states at iteration {i}')
                 new_state[negativeBool] = state[negativeBool]
+
                 j[negativeBool] += 1
                 #if diagnostic:
                 #    print(f'dt changed at iteration{i}')
             if np.any(nanStateBool):
-                num_nan = sum(nanStateBool)
+                num_nan = np.sum(nanStateBool)
                 if diagnostic:
                     print(f'rewinding {num_nan} states to avoid nan at iteration {i}')
                 new_state[nanStateBool] = state[nanStateBool]
                 j[nanStateBool] += 1
             
-            new_state = (new_state.T / new_state.sum(axis=-1)).T
+            new_state = self.normalize_state(new_state)
 
-            epr = self.get_epr(state)
+            epr = np.asarray(self.get_epr(state))
+
+            eprIncreaseBool = (epr - eprs[-1])/eprs[-1] > 1E-1
+                
+            if np.any(eprIncreaseBool):
+                num_inc = np.sum(eprIncreaseBool)
+                if diagnostic:
+                    print(f'partially rewinding {num_inc} states to avoid EPR increase at iteration {i}')
+                alpha = np.random.randint(50,70)/100
+                new_state[eprIncreaseBool] = alpha*state[eprIncreaseBool]+(1-alpha)*new_state[eprIncreaseBool]
+                epr = np.asarray(self.get_epr(state))
+                j[eprIncreaseBool] += 1
+
             eprs.append(epr)
-
             states.append(new_state)
             state = new_state
 
             if not diagnostic:
                 eprs = eprs[-3:]
                 states = states[-3:]
-            if i >= dt_iter:
-                doneBool = np.all(np.isclose(0, np.abs(self.get_meps_deriv(state))/np.maximum(1E-12,state), atol=1E-4), axis=-1)
+            if not ( np.any(negativeBool) or np.any(nanStateBool) ):
+                doneBool = np.all(np.isclose(0, np.abs(self.get_meps_deriv(state))/np.maximum(1E-12,state), atol=1E-2), axis=-1)
                 #doneBool = np.all(np.isclose(states[-1],states[-2], rtol=1E-4, atol=1E-14), axis=-1)
                 doneEprBool = np.isclose(eprs[-1],eprs[-2], rtol=1E-3*dt, atol=1E-14)
 
@@ -395,6 +422,10 @@ class ContinuousTimeMarkovChain():
     def normalize_state(self, state):
         assert self.validate_state, 'found invalid state shape'
 
+        if np.any(state < 0):
+            print('found negative state, taking absolute value')
+            state = np.abs(state)
+
         if np.all(state.sum(axis=-1)==1):
             return state
         else:
@@ -405,7 +436,7 @@ class ContinuousTimeMarkovChain():
 
 
 
-    def get_ness(self, dt0=1, dt_iter=150, dtmin=.001, max_iter=50_000, force_analytic=False, diagnostic=False):
+    def get_ness(self, dt0=1, dt_iter=50, dt_min=1E-8, max_iter=50_000, force_analytic=False, diagnostic=False):
         ness_list=[]
         try:
             ness = self.ness
@@ -434,14 +465,15 @@ class ContinuousTimeMarkovChain():
         doneBool = False
 
         if self.batch:
-            j = -1*np.ones(self.R.shape[0])
+            j = -1.*np.ones(self.R.shape[0])
         else:
-            j = np.array(-1)
+            j = np.array(-1.)
 
         while ( (not np.all(doneBool)) or np.any(negativeBool) )  and i < max_iter:
             if i % dt_iter == 0:
-                j += 1 
-            dt = dt0 * (2/(2+j))
+                j += 1
+            #dt = dt0 * (2/(2+j))
+            dt = np.maximum(dt0 * .95**j, dt_min)
 
             ness_list.append(ness)
             if self.batch:
@@ -456,6 +488,8 @@ class ContinuousTimeMarkovChain():
                     print(f'rewinding {num_neg} states to avoid negative states at iteration {i}')
                 ness[negativeBool] = ness_list[-1][negativeBool]
                 j[negativeBool] += 1
+        
+            
             
             #doneBool = np.all(np.isclose(0, self.get_time_deriv(ness)))
             doneBool = np.all(np.isclose(0, np.abs(self.get_time_deriv(ness))/np.maximum(1E-12,ness), atol=1E-4), axis=-1)
