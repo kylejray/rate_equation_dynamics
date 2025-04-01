@@ -40,7 +40,7 @@ def detailed_balance_generator(S=5, N=1, energy = None, energy_gen = np.random.u
 
 from sys import getsizeof
 from time import sleep
-def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.random.uniform, beta=1, gen_args=[.1,1], n_pumps=0, pump_strength=10):
+def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.random.uniform, beta=1, gen_args=[-1,1], n_pumps=0, pump_strength=5):
     n_pairs = int((S**2-S)/2)
 
     if energy is None:
@@ -89,7 +89,7 @@ class ContinuousTimeMarkovChain():
         self.time_even_states = True
         self.analytic_threshhold = 65
         self.min_rate = 1E-32
-        self.min_state = 1E-16
+        self.min_state = 1E-32
         self.verbose = False
         if R is not None:
             self.set_rate_matrix(R)
@@ -293,7 +293,7 @@ class ContinuousTimeMarkovChain():
         return state
     
 
-    def get_meps(self, dt0=1, dt_min=1E-8 , state=None, max_iter=50_000, dt_iter=50, diagnostic=False):
+    def get_meps(self, dt0=1, dt_min=1E-8 , state=None, max_iter=5_000, dt_iter=50, diagnostic=False):
         if state is None:
             try:
                 state = self.meps
@@ -322,9 +322,6 @@ class ContinuousTimeMarkovChain():
             dt = np.maximum(dt0*.95**j, dt_min)
 
             if self.batch:
-
-                state / self.get_meps_deriv(state)
-
                 new_state = state + dt[:,None]*self.get_meps_deriv(state)
                 #new_state[doneBool] = state[doneBool]  
             else:
@@ -374,7 +371,7 @@ class ContinuousTimeMarkovChain():
                 eprs = eprs[-3:]
                 states = states[-3:]
             if not ( np.any(negativeBool) or np.any(nanStateBool) ):
-                doneBool = np.all(np.isclose(0, np.abs(self.get_meps_deriv(state))/np.maximum(1E-12,state), atol=1E-2), axis=-1)
+                doneBool = np.all(np.isclose(0, np.abs(self.get_meps_deriv(state))/np.maximum(1E-12,state), atol=1E-4), axis=-1)
                 #doneBool = np.all(np.isclose(states[-1],states[-2], rtol=1E-4, atol=1E-14), axis=-1)
                 doneEprBool = np.isclose(eprs[-1],eprs[-2], rtol=1E-3*dt, atol=1E-14)
 
@@ -422,9 +419,10 @@ class ContinuousTimeMarkovChain():
     def normalize_state(self, state):
         assert self.validate_state, 'found invalid state shape'
 
-        if np.any(state < 0):
-            print('found negative state, taking absolute value')
-            state = np.abs(state)
+        if np.any(state <= 0):
+            print('found negative or zero state, setting to min state prob')
+            state[state <= 0] = self.min_state
+        
 
         if np.all(state.sum(axis=-1)==1):
             return state
@@ -436,7 +434,7 @@ class ContinuousTimeMarkovChain():
 
 
 
-    def get_ness(self, dt0=1, dt_iter=50, dt_min=1E-8, max_iter=50_000, force_analytic=False, diagnostic=False):
+    def get_ness(self, dt0=1, dt_iter=50, dt_min=1E-8, max_iter=5_000, force_analytic=False, diagnostic=False):
         ness_list=[]
         try:
             ness = self.ness
