@@ -439,7 +439,7 @@ class ContinuousTimeMarkovChain():
         try:
             ness = self.ness
         except:
-            if np.log(self.R.shape[0])*np.sqrt(self.S) < self.analytic_threshhold or force_analytic: 
+            if (1+np.log(self.R.shape[0])) * np.sqrt(self.S) < self.analytic_threshhold or force_analytic: 
                 try:
                     ness = self.__ness_estimate()
                 except:
