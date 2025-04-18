@@ -43,6 +43,14 @@ from time import sleep
 def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.random.uniform, beta=1, gen_args=[-1,1], n_pumps=0, pump_strength=5):
     n_pairs = int((S**2-S)/2)
 
+    int_type ='uint'
+    largest_int = max(S, N)
+    int_bytes = np.ceil(np.log2(largest_int))
+    for precision in [8, 16, 32]:
+        if int_bytes < precision:
+            int_type = f'uint{precision}'
+            break
+
     if energy is None:
         energy = energy_gen(*gen_args, size=(N,S))
     assert energy.shape == (N,S)
@@ -50,30 +58,27 @@ def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.
     if barrier is None:
         barrier = energy_gen(*gen_args, size=(N,n_pairs)) 
     assert barrier.shape == (N, n_pairs)
+    
     barrier = np.abs(barrier)
     delta_E = -energy[:,:,None] + energy[:,None,:]
     # find transitions where delta_E is negative
-    idx = np.argwhere(delta_E < 0).reshape(N, -1, 3)
+    idx = np.argwhere(delta_E < 0).astype(int_type).reshape(N, -1, 3)
 
     #delta_E = np.where(delta_E>0, barrier+delta_E[delta_E>0], delta_E)
     # transitions from high energy to low energy just need to overcome the barrier
     delta_E[idx[...,0],idx[...,1],idx[...,2]] = barrier
-    sleep(10)
     # low to high energy transitions must overcome the energy difference and the barrier as well
     delta_E[idx[...,0],idx[...,2],idx[...,1]] += barrier
 
     barrier = None
-    idx = None
-
 
     # adds catalytic pumps to some one way transitions
     if n_pumps > 0:
-        idx = np.zeros( shape=(N, n_pumps, 3), dtype='int')
-        pump_offsets = energy_gen(*gen_args, size=(N,n_pumps)) * pump_strength
-        idx[...,1:] =  np.random.randint(0,S, size = (N, n_pumps, 2))
-        idx[...,0] = np.floor(np.arange(0,N*n_pumps)/(n_pumps)).reshape(N,-1)
-        delta_E[tuple(idx.T)] += pump_offsets.T
-    #print([getsizeof(item)/2**30 for item in [energy, barrier, delta_E, idx, pump_offsets]])
+        idx = np.zeros( shape=(N, n_pumps, 3), dtype=int_type)
+        idx[...,1:] =  np.random.randint(0,S, size = (N, n_pumps, 2), dtype= int_type)
+        idx[...,0] = np.floor(np.arange(0,N*n_pumps)/(n_pumps)).reshape(N,-1).astype(int_type)
+        delta_E[tuple(idx.T)] += (energy_gen(*gen_args, size=(N,n_pumps)) * pump_strength).T
+    print([getsizeof(item)/2**30 for item in [energy, barrier, delta_E, idx]])
     delta_E = np.exp(-delta_E)
 
     return delta_E
