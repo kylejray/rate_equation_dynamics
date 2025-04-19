@@ -78,7 +78,7 @@ def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.
         idx[...,1:] =  np.random.randint(0,S, size = (N, n_pumps, 2), dtype= int_type)
         idx[...,0] = np.floor(np.arange(0,N*n_pumps)/(n_pumps)).reshape(N,-1).astype(int_type)
         delta_E[tuple(idx.T)] += (energy_gen(*gen_args, size=(N,n_pumps)) * pump_strength).T
-    print([getsizeof(item)/2**30 for item in [energy, barrier, delta_E, idx]])
+    #print([getsizeof(item)/2**30 for item in [energy, barrier, delta_E, idx]])
     delta_E = np.exp(-delta_E)
 
     return delta_E
