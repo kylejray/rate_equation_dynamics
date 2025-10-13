@@ -9,26 +9,31 @@ def normal_generator(S=10, N=1, mu=0, sigma=1):
 def gamma_generator(S=10, N=1, mu=1, sigma=.1):
     return np.random.gamma(mu**2/sigma**2, sigma**2/mu, (N,S,S))
 
-def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, min_rate=6):
+def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, max_reverse_rate=1.5):
     # imposes a kind of 1-D ring connectivity
 
     # if max_jump is 1, then only nearest neighbor jumps are allowed (1->2, 2->3, 5->4 etc..)
     if max_jump is None or max_jump > S-1:
         max_jump = S-1
 
-    R = np.ones((N,S,S)) * 10**(-min_rate)
+    R = np.zeros((N,S,S))
     
     
     for i in range(1,max_jump+1):
         # sets forward rates to be decreasing in distance from initial state plus a random normal distribution, here N(mu,sigma).
-        # for example, the jump rate from 2->3 in a 5 state system would be 4+N(mu, sigma) where 2->5 would be 1+N(mu,sigma)
-        new_vals_p = np.abs((S-i)+np.random.normal(mu, sigma, size=(N,S)))
+        new_vals_p = np.exp( np.abs((S-i)+np.random.normal(mu, sigma, size=(N,S))) )
+
         # in order to be less on average, and set a preferred direciton the reverse rates are set to be R_{3->2} = N(.6,.3)*R_{2->3}
-        new_vals_m = np.abs(new_vals_p*np.random.normal(.6, .3, size=(N,S)))
+        new_vals_m = new_vals_p * np.random.uniform(0, max_reverse_rate, size=(N,S))
 
         #set the transition rates, one disgonal at a time
         R += np.multiply(new_vals_p[..., None], np.eye(S, k=i))
         R += np.multiply(new_vals_m[..., None], np.eye(S, k=-i))
+
+    # conect the "ends" of the ring with a catalytic jump
+    R[...,S-1,0] = np.max(R) 
+    R[...,0,S-1] = R[...,S-1,0]
+
 
     return R
 
@@ -83,7 +88,13 @@ def arrhenius_pump_generator(S=5, N=1, energy=None, barrier=None, energy_gen=np.
 
     return delta_E
 
+def exponential_generator(S=5, N=1, scale=1, slowstate=False):
+    R = np.random.exponential(scale, (N,S,S))
+    if slowstate:
+        R[...,0,:] *= .01
+        R[...,:,0] *= .01
 
+    return R
 
 
 class ContinuousTimeMarkovChain():
@@ -92,10 +103,11 @@ class ContinuousTimeMarkovChain():
         self.timescale = 1
         self.batch = False
         self.time_even_states = True
-        self.analytic_threshhold = 65
-        self.min_rate = 1E-32
+        self.analytic_threshhold = 200
+        self.min_rate = 1E-12
         self.min_state = 1E-32
         self.verbose = False
+        self.forbidden_mask = None
         if R is not None:
             self.set_rate_matrix(R)
         else:
@@ -104,13 +116,29 @@ class ContinuousTimeMarkovChain():
             self.set_rate_matrix(self.generator(**self.gen_kwargs))     
     
     def set_rate_matrix(self, R, max_rate=1):
+        try:
+            delattr(self, 'ness')
+            delattr(self, 'meps')
+        except AttributeError:
+            pass
         R = self.verify_rate_matrix(R)
         R = self.normalize_R(R)
+
         self.R = R
         if self.time_even_states is True:
             self.rev_R = self.R
         if self.time_even_states is False:
             self.rev_R = self.get_reversal_matrix() @ self.R @ self.get_reversal_matrix().T
+            # Apply the forbidden mask to the transpose of R_rev, then transpose back to get rev_R
+            if self.batch:
+                rev_R_T = self.rev_R.transpose(0, 2, 1)
+                rev_R_T[self.forbidden_mask] = 0
+                self.rev_R = rev_R_T.transpose(0, 2, 1)
+            else:
+                rev_R_T = self.rev_R.T
+                rev_R_T[self.forbidden_mask] = 0
+
+                self.rev_R = rev_R_T.T
         self.__set_statewise_Q()
         return 
     
@@ -141,11 +169,33 @@ class ContinuousTimeMarkovChain():
         S, shape, size = self.__R_info(R)
         
         assert len(shape) == 2 and size == S**2, 'each R must be a 2D square matrix'
-        assert ( np.sign(R-R*np.identity(S)) == np.ones(shape)-np.identity(S)).all(), 'R_ij must be >0 for i!=j'
+        # Modified assertion: R_ij must be >=0 for i!=j (allowing zeros for forbidden transitions)
+        assert ( np.sign(R-R*np.identity(S)) >= np.zeros(shape)-np.identity(S)).all(), 'R_ij must be >=0 for i!=j'
 
         self.S = S
 
-        R[np.abs(R) <= self.min_rate] = self.min_rate
+        # Identify forbidden transitions (those below min_rate threshold)
+        forbidden = np.abs(R) <= self.min_rate
+        
+        # Store forbidden mask for R (excluding diagonal)
+        self.forbidden_mask = forbidden & (~np.eye(S, dtype=bool))
+        
+        # For time_even_states=True, enforce symmetric forbidding
+        if self.time_even_states is True:
+            # enforce symmetry for time even states
+            if self.batch:
+                self.forbidden_mask = self.forbidden_mask | self.forbidden_mask.transpose(0, 2, 1)
+            else:
+                self.forbidden_mask = self.forbidden_mask | self.forbidden_mask.T
+        else:
+            # For time_even_states=False, enforce involution symmetry for forbidding
+            if self.batch:
+                self.forbidden_mask = self.forbidden_mask | (self.get_reversal_matrix() @ self.forbidden_mask @ self.get_reversal_matrix().T).transpose(0, 2, 1)
+            else:
+                self.forbidden_mask = self.forbidden_mask | (self.get_reversal_matrix() @ self.forbidden_mask @ self.get_reversal_matrix().T).T
+        
+        # Set forbidden transitions in R to exactly 0
+        R[self.forbidden_mask] = 0
         
         if not (R.sum(axis=-1) == np.zeros(self.S)).all():
             R = self.__set_diags(R)
@@ -176,12 +226,21 @@ class ContinuousTimeMarkovChain():
         else:
             rev_R_T = self.rev_R.T
         
-        #this makes sure the rev transpose gives 0 for all diagonal elements when taking the log ratio
-        rev_R_T = rev_R_T - rev_R_T*np.identity(self.S) + self.R*np.identity(self.S)
+        R_zero = (self.R == 0) & (~np.eye(self.S, dtype=bool))
+        rev_R_T_zero = (rev_R_T == 0) & (~np.eye(self.S, dtype=bool))
+        # R_zero should be a subset of rev_R_T_zero (wherever R is 0, rev_R_T must also be 0)
+        assert np.all(R_zero == rev_R_T_zero), "Inconsistency: wherever R is zero, rev_R_T must also be zero and vice versa."
+        
+    
+        log_ratio = np.zeros_like(self.R)
+        
+        nonzero_mask = (self.R != 0) & (~np.eye(self.S, dtype=bool))
+        
+        log_ratio[nonzero_mask] = np.log(self.R[nonzero_mask] / rev_R_T[nonzero_mask])
         
         R_diags, rev_R_diags = [ R*np.identity(self.S) for R in [self.R, self.rev_R]]
 
-        self.statewise_Q = ((self.R * np.log(self.R/rev_R_T) )+ R_diags - rev_R_diags).sum(axis=-1)
+        self.statewise_Q = ((self.R * log_ratio) + R_diags - rev_R_diags).sum(axis=-1)
 
         if np.any(np.isnan(self.statewise_Q)):
             print('statewise heat contained NANs, re-veryfying matrix')
@@ -194,8 +253,8 @@ class ContinuousTimeMarkovChain():
         except:
             self.involution_indices = involution_builder(self.S)
             involution = self.involution_indices
-        rev_matrix = np.zeros((self.S,self.S))
-        rev_matrix[range(self.S),involution]=1
+        rev_matrix = np.zeros((self.S,self.S), dtype=bool)
+        rev_matrix[range(self.S),involution] = 1
         return rev_matrix
 
     def get_time_deriv(self, state, R = None):
@@ -410,6 +469,12 @@ class ContinuousTimeMarkovChain():
         
         return self.normalize_state(ness)
     
+    def ness_analytic(self, n=0):
+        M = self.R.copy()
+        M[...,n] = 1
+        ness = np.linalg.inv(M)[...,n,:]
+        return self.normalize_state(ness)
+
 
     def validate_state(self, state):
         shape = state.shape
@@ -446,14 +511,19 @@ class ContinuousTimeMarkovChain():
         except:
             if (1+np.log(self.R.shape[0])) * np.sqrt(self.S) < self.analytic_threshhold or force_analytic: 
                 try:
-                    ness = self.__ness_estimate()
+                    ness = self.ness_analytic()
                 except:
                     if self.verbose:
-                        print('defaulting to numeric solution')
+                        print('defaulting to min eigenval')
                     try:
-                        ness = self.meps
+                        ness = self.__ness_estimate()
                     except:
-                        ness = self.get_uniform()
+                        if self.verbose:
+                            print('defaulting to numeric solution')
+                        try:
+                            ness = self.meps
+                        except:
+                            ness = self.get_uniform()
             else:
                 if self.verbose:
                     print('defaulting to numeric solution')
@@ -547,6 +617,8 @@ def involution_builder(N_states, N_swaps=None):
         involution[i1] = i2
         involution[i2] = i1
     return involution
+
+
 
 
     
