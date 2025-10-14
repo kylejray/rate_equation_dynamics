@@ -21,7 +21,7 @@ def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, max_reverse_rate=1.
     
     for i in range(1,max_jump+1):
         # sets forward rates to be decreasing in distance from initial state plus a random normal distribution, here N(mu,sigma).
-        new_vals_p = np.exp( np.abs((S-i)+np.random.normal(mu, sigma, size=(N,S))) )
+        new_vals_p = np.exp( -i+np.random.normal(mu, sigma, size=(N,S))) 
 
         # in order to be less on average, and set a preferred direciton the reverse rates are set to be R_{3->2} = N(.6,.3)*R_{2->3}
         new_vals_m = new_vals_p * np.random.uniform(0, max_reverse_rate, size=(N,S))
@@ -31,8 +31,8 @@ def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, max_reverse_rate=1.
         R += np.multiply(new_vals_m[..., None], np.eye(S, k=-i))
 
     # conect the "ends" of the ring with a catalytic jump
-    R[...,S-1,0] = np.max(R) 
-    R[...,0,S-1] = R[...,S-1,0]
+    R[...,-1,0] = R.max(axis=-1).max(axis=-1) 
+    R[...,0,-1] = R[...,-1,0]
 
 
     return R
@@ -169,18 +169,14 @@ class ContinuousTimeMarkovChain():
         S, shape, size = self.__R_info(R)
         
         assert len(shape) == 2 and size == S**2, 'each R must be a 2D square matrix'
-        # Modified assertion: R_ij must be >=0 for i!=j (allowing zeros for forbidden transitions)
         assert ( np.sign(R-R*np.identity(S)) >= np.zeros(shape)-np.identity(S)).all(), 'R_ij must be >=0 for i!=j'
 
         self.S = S
 
         # Identify forbidden transitions (those below min_rate threshold)
         forbidden = np.abs(R) <= self.min_rate
-        
-        # Store forbidden mask for R (excluding diagonal)
         self.forbidden_mask = forbidden & (~np.eye(S, dtype=bool))
         
-        # For time_even_states=True, enforce symmetric forbidding
         if self.time_even_states is True:
             # enforce symmetry for time even states
             if self.batch:
@@ -194,7 +190,6 @@ class ContinuousTimeMarkovChain():
             else:
                 self.forbidden_mask = self.forbidden_mask | (self.get_reversal_matrix() @ self.forbidden_mask @ self.get_reversal_matrix().T).T
         
-        # Set forbidden transitions in R to exactly 0
         R[self.forbidden_mask] = 0
         
         if not (R.sum(axis=-1) == np.zeros(self.S)).all():
@@ -228,7 +223,7 @@ class ContinuousTimeMarkovChain():
         
         R_zero = (self.R == 0) & (~np.eye(self.S, dtype=bool))
         rev_R_T_zero = (rev_R_T == 0) & (~np.eye(self.S, dtype=bool))
-        # R_zero should be a subset of rev_R_T_zero (wherever R is 0, rev_R_T must also be 0)
+
         assert np.all(R_zero == rev_R_T_zero), "Inconsistency: wherever R is zero, rev_R_T must also be zero and vice versa."
         
     
@@ -470,6 +465,7 @@ class ContinuousTimeMarkovChain():
         return self.normalize_state(ness)
     
     def ness_analytic(self, n=0):
+        # this is currently the preferred way to find ness, perhaps I will get rid of the other ways
         M = self.R.copy()
         M[...,n] = 1
         ness = np.linalg.inv(M)[...,n,:]
