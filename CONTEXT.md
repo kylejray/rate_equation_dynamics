@@ -15,7 +15,7 @@ The central question: how do nonequilibrium systems self-organize, and under wha
 
 ```
 discrete_states/
-├── ctmc.py                  # Main module (~1,470 lines). All core logic lives here.
+├── ctmc.py                  # Main module (~1,680 lines). All core logic lives here.
 ├── ctmc_parallel.py         # MPI wrapper for cluster-scale batched computation
 ├── test_refactored.py       # Comprehensive test suite (~800 lines)
 ├── FORBIDDEN_TRANSITIONS_README.md  # Docs on the forbidden transitions feature
@@ -30,6 +30,16 @@ discrete_states/
 │   ├── meps_method_comparison.ipynb  # Euler vs. JAX L-BFGS comparison
 │   ├── pump_scaling_demo.ipynb       # Large-scale Arrhenius pump studies
 │   └── plot_sweeps.ipynb             # Parameter sweep visualization
+├── extra_plots/
+│   ├── plot_common.py               # Shared constants and utilities for plotting
+│   ├── plot_appendix.py             # 10 appendix figures (Arrhenius, cyclic, decay)
+│   ├── plot_fixed_degree.py         # 4-panel fixed-degree sweep figure
+│   ├── run_appendix.py              # Data generation: Arrhenius ER/SW experiments
+│   ├── run_cyclic_appendix.py       # Data generation: cyclic ring experiments
+│   ├── run_fixed_degree_v2.py       # Data generation: fixed-degree sweep
+│   ├── run_fixed_degree_v2_dense.py # Data generation: dense baseline
+│   ├── data_*/                      # Generated data directories (gitignored)
+│   └── final_plots/                 # Generated figures (gitignored)
 └── *.npz                    # Cached numerical results (not tracked in git)
 ```
 
@@ -72,6 +82,9 @@ ctmc = ContinuousTimeMarkovChain(R=my_rate_matrix)
 
 # With time-reversal involution:
 ctmc = ContinuousTimeMarkovChain(R=R, time_even_states=False)
+
+# time_even_states is now a constructor parameter (default True).
+# Previously it was hardcoded and had to be set after construction.
 ```
 
 ### Important Attributes
@@ -117,7 +130,8 @@ All return an `(S,S)` or `(N,S,S)` rate matrix:
 | `uniform_generator(S, N)` | Random rates, uniformly distributed |
 | `normal_generator(S, N, mu, sigma)` | Gaussian-distributed rates |
 | `gamma_generator(S, N, mu, sigma)` | Gamma-distributed rates |
-| `cyclic_generator(S, N, ...)` | Ring topology with directional bias |
+| `spiral_staircase_generator(S, N, ...)` | Chain with catalytic shortcut (legacy) |
+| `cyclic_generator(S, N, ..., decay_alpha)` | True ring topology with modular distance |
 | `detailed_balance_generator(S, N, energy, beta)` | Equilibrium systems (zero EPR) |
 | `arrhenius_pump_generator(S, N, energy, barrier, n_pumps, pump_strength)` | Nonequilibrium with catalytic pumps |
 | `exponential_generator(S, N, scale)` | Exponentially distributed rates |
@@ -125,12 +139,30 @@ All return an `(S,S)` or `(N,S,S)` rate matrix:
 ### Sparsification
 
 ```python
-from ctmc import sparsify
+from ctmc import sparsify, small_world_sparsify
 
+# Erdos-Renyi sparsification: random edge removal
 R_sparse = sparsify(R, avg_degree=10, ensure_connected=True, seed=42)
+
+# Watts-Strogatz small-world sparsification: ring lattice + rewiring
+R_sw = small_world_sparsify(R, k=6, beta=0.1, ensure_connected=True, seed=42)
 ```
 
-Removes edges via Erdos-Renyi sampling while maintaining strong connectivity (irreducibility). Automatically repairs disconnected components. Respects forbidden transition symmetry.
+`sparsify()` removes edges via Erdos-Renyi sampling while maintaining strong connectivity (irreducibility). `small_world_sparsify()` starts with a ring lattice of degree k and rewires each edge with probability beta, producing networks with high clustering and short path lengths. Both automatically repair disconnected components and respect forbidden transition symmetry.
+
+---
+
+## extra_plots/ — Numerical Experiments & Figures
+
+The `extra_plots/` directory contains the numerical experiments supporting the paper's appendix. The workflow is: `run_*.py` scripts generate `.npz` data files, then `plot_*.py` scripts produce publication figures.
+
+**Data generation scripts** (`run_*.py`): Each script sweeps system size S with many random trials per size, computing NESS EPR, MEPS EPR, uniform EPR, and D_KL(NESS || MEPS) for each trial. Experiments cover Arrhenius pumps on Erdos-Renyi and small-world topologies, cyclic ring generators with and without distance decay, and a fixed-degree sweep holding average degree constant while growing S.
+
+**Plotting scripts** (`plot_*.py`): Both `plot_appendix.py` and `plot_fixed_degree.py` import shared infrastructure from `plot_common.py`. They accept a CLI argument (`mean` or `median`) to control the center line statistic, and always show IQR (25th/75th percentile) bands. Usage: `python plot_appendix.py mean` or `python plot_fixed_degree.py median`.
+
+**Equilibrium filter**: All plotting scripts discard trials where NESS EPR < 1e-10 (the `EQ_THRESHOLD` constant). These are effectively equilibrium systems produced when random generators happen to create near-canceling cycle forces, leaving EPR at the float-noise floor (~1e-16). A clear bimodal gap of many orders of magnitude separates these from the weakest genuinely driven systems (~1e-8), so the exact threshold is not critical. The filter drops only ~0.4% of trials, concentrated at small system sizes (S=10, S=25) in sparse configurations.
+
+**Key metric**: The primary quantity of interest is the excess EPR ratio `sigma_NESS / sigma_MEPS - 1`, which measures how far the NESS entropy production exceeds the theoretical minimum. Values near zero indicate that NESS is close to MEPS.
 
 ---
 
@@ -186,13 +218,14 @@ Tests cover: rate matrix validation, probability conservation, EPR properties (M
 - Comprehensive test suite
 
 ### Recently added (working but may evolve):
-- **Time-reversal involutions** (`time_even_states=False`, `involution_indices`, `involution_builder()`): Allows arbitrary state-swap involutions beyond the identity. The time-reversed rate matrix and forbidden transition symmetry both respect the involution structure.
+- **Time-reversal involutions** (`time_even_states=False`, `involution_indices`, `involution_builder()`): Allows arbitrary state-swap involutions beyond the identity. The time-reversed rate matrix and forbidden transition symmetry both respect the involution structure. `time_even_states` is now a constructor parameter.
 - **JAX L-BFGS solver** (`get_meps_jax()`): Uses softmax parameterization for unconstrained optimization. Better convergence than Euler, especially for large state spaces.
+- **Small-world sparsification** (`small_world_sparsify()`): Watts-Strogatz rewiring of ring lattices, preserving rate values from the original dense matrix.
+- **Appendix experiment suite** (`extra_plots/`): Full pipeline of data generation and plotting scripts for the paper's numerical appendix, with equilibrium filtering, mean/median center lines, and IQR bands.
 
 ### Known rough edges:
 - MEPS Euler method can struggle near simplex boundaries (probabilities approaching zero)
 - Batch mode is memory-intensive for large N or S (everything is dense numpy arrays)
-- Some notebooks are exploratory scratch work, not polished documentation
 - The `min_rate` default was changed from `1e-32` to `1e-12` at some point; the FORBIDDEN_TRANSITIONS_README.md references the old default
 
 ---

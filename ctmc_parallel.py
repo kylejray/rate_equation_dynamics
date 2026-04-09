@@ -10,7 +10,7 @@ import sys, os
 sys.path.append(os.path.expanduser('~/source/discrete_states/'))
 
 from ctmc import ContinuousTimeMarkovChain as MC
-from ctmc import normal_generator, gamma_generator, uniform_generator, cyclic_generator, detailed_balance_generator, arrhenius_pump_generator
+from ctmc import normal_generator, gamma_generator, uniform_generator, spiral_staircase_generator, detailed_balance_generator, arrhenius_pump_generator
 
 import numpy as np
 from datetime import datetime

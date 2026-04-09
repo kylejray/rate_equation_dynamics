@@ -16,7 +16,7 @@ import numpy as np
 from ctmc import (
     ContinuousTimeMarkovChain,
     uniform_generator,
-    cyclic_generator,
+    spiral_staircase_generator,
     detailed_balance_generator,
     involution_builder,
 )
@@ -51,7 +51,7 @@ def test_basic_ctmc_creation():
     print("✓ Batch mode (N=3) with uniform generator")
     
     # Test with cyclic generator
-    ctmc_cyclic = ContinuousTimeMarkovChain(generator=cyclic_generator, S=6, N=1)
+    ctmc_cyclic = ContinuousTimeMarkovChain(generator=spiral_staircase_generator, S=6, N=1)
     assert ctmc_cyclic.S == 6
     print("✓ Cyclic generator")
     
@@ -299,7 +299,7 @@ def test_epr_meps_less_than_ness():
     """Test that EPR at MEPS <= EPR at NESS."""
     print("\n=== Test: EPR(MEPS) <= EPR(NESS) ===")
     
-    ctmc = ContinuousTimeMarkovChain(generator=cyclic_generator, S=6, N=1)
+    ctmc = ContinuousTimeMarkovChain(generator=spiral_staircase_generator, S=6, N=1)
     ness = ctmc.get_ness(diagnostic=False)
     meps = ctmc.get_meps(state=ness, diagnostic=False)
     
@@ -499,7 +499,7 @@ def test_ness_time_derivative():
     """Test that NESS has ~zero time derivative."""
     print("\n=== Test: NESS Time Derivative ===")
     
-    ctmc = ContinuousTimeMarkovChain(generator=cyclic_generator, S=6, N=1)
+    ctmc = ContinuousTimeMarkovChain(generator=spiral_staircase_generator, S=6, N=1)
     ness = ctmc.get_ness(diagnostic=False)
     
     time_deriv_at_ness = ctmc.get_time_deriv(ness)

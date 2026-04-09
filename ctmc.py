@@ -76,12 +76,17 @@ def gamma_generator(S=10, N=1, mu=1, sigma=0.1):
     return np.random.gamma(mu**2 / sigma**2, sigma**2 / mu, (N, S, S))
 
 
-def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, max_reverse_rate=1.5):
-    """Generate rate matrices with 1-D ring (cyclic) connectivity.
+def spiral_staircase_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, max_reverse_rate=1.5):
+    """Generate rate matrices with 1-D chain connectivity and a catalytic shortcut.
 
-    Forward rates decrease exponentially with jump distance. Reverse rates
-    are drawn as a fraction of the forward rates to create a preferred
-    direction. The ends of the ring are connected by a fast "catalytic" jump.
+    States are arranged linearly (not on a ring).  Forward rates decrease
+    exponentially with jump distance using diagonal-based indexing.  The two
+    end states are connected by a single fast "catalytic" jump to create a
+    preferred circulation direction — like a spiral staircase where you walk
+    up the stairs and slide back down.
+
+    For true ring (cyclic) connectivity with modular distance, use
+    ``cyclic_generator`` instead.
 
     Parameters
     ----------
@@ -92,7 +97,7 @@ def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, max_reverse_rate=1.
     mu, sigma : float
         Parameters for the Normal noise added to log-forward rates.
     max_jump : int or None
-        Maximum jump distance on the ring (None = S-1, fully connected).
+        Maximum jump distance (None = S-1, fully connected).
     max_reverse_rate : float
         Reverse rates are drawn as U(0, max_reverse_rate) * forward rate.
     """
@@ -107,13 +112,69 @@ def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None, max_reverse_rate=1.
         # Reverse rates: damped relative to forward to set preferred direction
         new_vals_m = new_vals_p * np.random.uniform(0, max_reverse_rate, size=(N, S))
 
-        # Set transition rates one diagonal at a time
+        # Set transition rates one diagonal at a time (no wrapping)
         R += np.multiply(new_vals_p[..., None], np.eye(S, k=i))
         R += np.multiply(new_vals_m[..., None], np.eye(S, k=-i))
 
-    # Connect the ends of the ring with a fast catalytic jump
+    # Connect the ends with a fast catalytic jump
     R[..., -1, 0] = R.max(axis=-1).max(axis=-1)
     R[..., 0, -1] = R[..., -1, 0]
+
+    return R
+
+
+def cyclic_generator(S=5, N=1, mu=0, sigma=1, max_jump=None,
+                     max_reverse_rate=1.5, decay_alpha=0.0):
+    """Generate rate matrices on a true ring (cyclic) topology.
+
+    States are arranged on a ring so that distances wrap around modularly.
+    Forward and backward rates depend on ring distance via exponential decay
+    with Gaussian noise.  Unlike ``spiral_staircase_generator``, every state
+    has the same local connectivity pattern — there is no special catalytic
+    shortcut.
+
+    Parameters
+    ----------
+    S : int
+        Number of states (ring size).
+    N : int
+        Batch size.
+    mu, sigma : float
+        Mean and standard deviation of Gaussian noise added to log rates.
+    max_jump : int or None
+        Maximum distance to connect on ring.  If None or > S//2, defaults
+        to S//2 (the maximum distinct distance on a ring).
+    max_reverse_rate : float
+        Reverse rates are drawn as U(0, max_reverse_rate) * forward rate.
+    decay_alpha : float
+        Distance decay exponent.  Rate ~ exp(-decay_alpha * dist + noise).
+        0 gives a flat ring (no distance dependence); larger values create
+        increasingly strong decay with distance.
+    """
+    if max_jump is None or max_jump > S // 2:
+        max_jump = S // 2
+
+    R = np.zeros((N, S, S))
+
+    for dist in range(1, max_jump + 1):
+        # Forward rates with Gaussian noise in log space
+        fwd_rates = np.exp(-decay_alpha * dist
+                           + np.random.normal(mu, sigma, size=(N, S)))
+        # Reverse rates are stochastic multiples of forward rates
+        rev_rates = fwd_rates * np.random.uniform(0, max_reverse_rate,
+                                                   size=(N, S))
+
+        # Connect edges on ring: state i connects to (i ± dist) mod S
+        for i in range(S):
+            j_fwd = (i + dist) % S
+            j_rev = (i - dist) % S
+            R[:, i, j_fwd] += fwd_rates[:, i]
+            R[:, i, j_rev] += rev_rates[:, i]
+
+    # Set diagonals so rows sum to zero
+    for n in range(N):
+        np.fill_diagonal(R[n], 0)
+        R[n] -= np.diag(R[n].sum(axis=1))
 
     return R
 
@@ -313,11 +374,11 @@ class ContinuousTimeMarkovChain():
                                   # convergence criterion — get_epr() always reports
                                   # the raw computed value.
 
-    def __init__(self, R=None, generator=uniform_generator, **gen_kwargs):
+    def __init__(self, R=None, generator=uniform_generator, time_even_states=True, **gen_kwargs):
         self.scale = 1
         self.timescale = 1
         self.batch = False
-        self.time_even_states = True
+        self.time_even_states = time_even_states
         self.analytic_threshhold = 200
         self.min_rate = 1E-12
         self.min_state = 1E-32
@@ -435,6 +496,7 @@ class ContinuousTimeMarkovChain():
         if not (R.sum(axis=-1) == np.zeros(self.S)).all():
             R = self._set_diags(R)
 
+        R = self.normalize_R(R)
         return R
 
     def normalize_R(self, R):
@@ -1463,6 +1525,219 @@ def sparsify(R, p=None, avg_degree=None, ensure_connected=True, seed=None):
                 edges_added = _repair_connectivity(R[n], rng)
                 if edges_added > 0:
                     # Verify repair worked
+                    assert is_irreducible(R[n]), \
+                        f'connectivity repair failed for matrix {n}'
+
+    if single:
+        return R[0]
+    return R
+
+
+def small_world_sparsify(R, k=4, beta=0.1, ensure_connected=True, seed=None):
+    """Apply Watts-Strogatz small-world rewiring to a dense rate matrix.
+
+    Starts with a ring lattice where each node connects to its k nearest
+    neighbors (k/2 on each side), then rewires each edge with probability
+    beta.  Rewired edges adopt their rate values from the original dense
+    rate matrix so that the thermodynamic structure is preserved.
+
+    Parameters
+    ----------
+    R : np.ndarray of shape (S, S) or (N, S, S)
+        Dense rate matrix or batch of rate matrices.
+    k : int
+        Number of nearest neighbors in the initial ring lattice. Must be
+        even and less than S. The resulting ring has degree k (k/2 on
+        each side).
+    beta : float
+        Rewiring probability in [0, 1].
+        - beta = 0: regular ring lattice (no rewiring).
+        - beta ~ 0.01-0.1: small-world regime (high clustering, short paths).
+        - beta = 1: maximally random (similar density to ring but random topology).
+    ensure_connected : bool
+        If True (default), repair connectivity after rewiring.
+    seed : int or None
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    np.ndarray
+        Sparsified rate matrix with small-world topology, same shape as input.
+
+    Notes
+    -----
+    The algorithm follows the original Watts-Strogatz procedure [1]:
+    for each node i and each of its k/2 clockwise neighbors j, with
+    probability beta the edge (i, j) is replaced by (i, j') where j'
+    is chosen uniformly at random from nodes that are not i and not
+    already a neighbor. Both directions of the edge pair are rewired
+    together to maintain the symmetric forbidden-transition structure.
+
+    [1] D. J. Watts and S. H. Strogatz, Nature 393, 440 (1998).
+
+    Examples
+    --------
+    >>> R_dense = arrhenius_pump_generator(S=50, N=10, n_pumps=100)
+    >>> R_sw = small_world_sparsify(R_dense, k=6, beta=0.1)
+    >>> machine = ContinuousTimeMarkovChain(R=R_sw)
+    >>> ness = machine.get_ness()
+    """
+    R = np.asarray(R, dtype=float)
+    single = (R.ndim == 2)
+    if single:
+        R = R[np.newaxis, ...].copy()
+    else:
+        R = R.copy()
+
+    # Keep original rates for rewired edges
+    R_orig = R.copy()
+
+    N_batch, S, _ = R.shape
+    assert S >= 4, f'need at least 4 states for small-world, got {S}'
+    assert k >= 2, f'k must be at least 2, got {k}'
+    assert k % 2 == 0, f'k must be even, got {k}'
+    assert k < S, f'k={k} must be less than S={S}'
+    assert 0 <= beta <= 1, f'beta must be in [0, 1], got {beta}'
+
+    rng = np.random.default_rng(seed)
+    half_k = k // 2
+
+    for n in range(N_batch):
+        # --- Step 1: Build the ring lattice adjacency ---
+        # adj[i, j] = True if i and j are connected
+        adj = np.zeros((S, S), dtype=bool)
+        for offset in range(1, half_k + 1):
+            for i in range(S):
+                j = (i + offset) % S
+                adj[i, j] = True
+                adj[j, i] = True
+
+        # --- Step 2: Watts-Strogatz rewiring ---
+        # For each node i, consider each clockwise neighbor at offset 1..half_k
+        for offset in range(1, half_k + 1):
+            for i in range(S):
+                j = (i + offset) % S
+                if rng.random() < beta:
+                    # Rewire: replace edge (i, j) with (i, j')
+                    # j' must not be i and must not already be a neighbor
+                    candidates = [v for v in range(S) if v != i and not adj[i, v]]
+                    if not candidates:
+                        continue  # all nodes already neighbors, skip
+                    j_new = rng.choice(candidates)
+                    # Remove old edge
+                    adj[i, j] = False
+                    adj[j, i] = False
+                    # Add new edge
+                    adj[i, j_new] = True
+                    adj[j_new, i] = True
+
+        # --- Step 3: Apply adjacency mask to rate matrix ---
+        mask = adj | np.eye(S, dtype=bool)
+        R[n] = R_orig[n] * mask
+
+    # --- connectivity repair ---
+    if ensure_connected:
+        for n in range(N_batch):
+            if not is_irreducible(R[n]):
+                edges_added = _repair_connectivity(R[n], rng)
+                if edges_added > 0:
+                    assert is_irreducible(R[n]), \
+                        f'connectivity repair failed for matrix {n}'
+
+    if single:
+        return R[0]
+    return R
+
+
+def small_world_rewire(R, beta=0.1, ensure_connected=True, seed=None):
+    """Watts-Strogatz rewiring that transfers rates from old edges to new ones.
+
+    Unlike small_world_sparsify (which masks a dense matrix), this function
+    operates directly on a sparse rate matrix.  When an edge (i, j) is rewired
+    to (i, j'), the new edge inherits the old edge's rates:
+        R[i, j'] = R_old[i, j]   and   R[j', i] = R_old[j, i]
+    while R[i, j] and R[j, i] are zeroed out.
+
+    The input should already be sparse (e.g. from cyclic_generator with a
+    small max_jump).  The ring topology is inferred from the existing nonzero
+    off-diagonal structure — no separate k parameter is needed.
+
+    Parameters
+    ----------
+    R : np.ndarray of shape (S, S) or (N, S, S)
+        Sparse rate matrix (or batch) to rewire.
+    beta : float
+        Rewiring probability in [0, 1].
+    ensure_connected : bool
+        If True, repair connectivity after rewiring.
+    seed : int or None
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    np.ndarray
+        Rewired rate matrix, same shape as input.
+    """
+    R = np.asarray(R, dtype=float)
+    single = (R.ndim == 2)
+    if single:
+        R = R[np.newaxis, ...].copy()
+    else:
+        R = R.copy()
+
+    N_batch, S, _ = R.shape
+    assert 0 <= beta <= 1, f'beta must be in [0, 1], got {beta}'
+
+    rng = np.random.default_rng(seed)
+
+    for n in range(N_batch):
+        # Build adjacency from existing nonzero off-diagonal entries
+        adj = (R[n] > 0) & ~np.eye(S, dtype=bool)
+
+        # Collect undirected edge pairs (i, j) with i < j
+        edges = []
+        for i in range(S):
+            for j in range(i + 1, S):
+                if adj[i, j] or adj[j, i]:
+                    edges.append((i, j))
+
+        # Rewire each edge pair with probability beta
+        for (i, j) in edges:
+            if rng.random() >= beta:
+                continue
+
+            # Find candidates: nodes not already neighbors of i (and not i)
+            candidates = [v for v in range(S)
+                          if v != i and not adj[i, v] and v != j]
+            if not candidates:
+                continue
+
+            j_new = rng.choice(candidates)
+
+            # Transfer rates: old (i,j) -> new (i, j_new)
+            R[n, i, j_new] = R[n, i, j]
+            R[n, j_new, i] = R[n, j, i]
+
+            # Zero out old edge
+            R[n, i, j] = 0.0
+            R[n, j, i] = 0.0
+
+            # Update adjacency
+            adj[i, j] = False
+            adj[j, i] = False
+            adj[i, j_new] = True
+            adj[j_new, i] = True
+
+        # Fix diagonal (row sums must be negative of off-diagonal sums)
+        np.fill_diagonal(R[n], 0.0)
+        R[n] -= np.diag(R[n].sum(axis=1))
+
+    # Connectivity repair
+    if ensure_connected:
+        for n in range(N_batch):
+            if not is_irreducible(R[n]):
+                edges_added = _repair_connectivity(R[n], rng)
+                if edges_added > 0:
                     assert is_irreducible(R[n]), \
                         f'connectivity repair failed for matrix {n}'
 

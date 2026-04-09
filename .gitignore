@@ -169,3 +169,19 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# macOS
+.DS_Store
+
+# Generated data and plots (reproducible from run_*.py scripts)
+extra_plots/data_*/
+extra_plots/final_plots/
+extra_plots/*.png
+extra_plots/*.log
+*.npz
+
+# Loose output images
+output_*.png
+
+# PDFs
+*.pdf
