@@ -185,3 +185,8 @@ output_*.png
 
 # PDFs
 *.pdf
+
+# Fig 5/6 generation outputs (data caches and rendered figures stay local)
+fig_gen_5and6/data_fig5/
+fig_gen_5and6/data_fig6/
+fig_gen_5and6/plots/

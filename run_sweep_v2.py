@@ -176,8 +176,9 @@ def merge_results(existing, s_values, new_data):
         Ready to pass to np.savez().
     """
     if existing is None:
-        # Fresh start
-        all_s = sorted(s_values)
+        # Fresh start — only include S values that actually have data
+        # (a trial may have failed and been skipped in the main loop)
+        all_s = sorted(s for s in s_values if f'{s:05d}' in new_data)
         trials = []
         result = {'s_values': np.array(all_s)}
         for s in all_s:
